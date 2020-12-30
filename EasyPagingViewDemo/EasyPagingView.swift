@@ -26,6 +26,11 @@ public protocol EasyPagingViewDataSource: NSObjectProtocol {
 
 open class EasyPagingView: UIScrollView {
     
+    private enum ScrollingDirection {
+        case up
+        case down
+    }
+    
     public var defaultSelectedIndex: Int = 0
     public weak var dataSource: EasyPagingViewDataSource?
     public var pageHeaderView: UIView?
@@ -37,6 +42,9 @@ open class EasyPagingView: UIScrollView {
     var pageCurrentOffsetDict = [Int: CGFloat]()
     var contentOffsetDict = [Int: CGFloat]()
     var pageCollectionViewOriginY: CGFloat = 0
+    var isNewPage: Bool = false
+    var lastOffsetY: CGFloat = 0
+    var isUp: Bool = false
 
     var currentIndex: Int = 0
     var subviewsInLayoutOrder = [UIView]()
@@ -47,7 +55,6 @@ open class EasyPagingView: UIScrollView {
     
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        
         commonInitForEasyContainerScrollview()
     }
     
@@ -78,17 +85,23 @@ open class EasyPagingView: UIScrollView {
         pageCollectionView.bounces = false
         pageCollectionView.showsHorizontalScrollIndicator = false
         pageCollectionView.contentInsetAdjustmentBehavior = .never
+        
+        self.delegate = self
     }
     
     func reloadData() {
         
-        if let headerView = pagePinView {
+        if let headerView = pageHeaderView {
             contentView.addSubview(headerView)
         }
         
+        if let pinView = pagePinView {
+            contentView.addSubview(pinView)
+        }
+        
         contentView.addSubview(pageCollectionView)
-        if let headerView = pagePinView {
-            contentView.bringSubviewToFront(headerView)
+        if let pinView = pagePinView {
+            contentView.bringSubviewToFront(pinView)
         }
     }
     
@@ -136,6 +149,15 @@ open class EasyPagingView: UIScrollView {
     open override func layoutSubviews() {
         super.layoutSubviews()
         
+        var aa: CGFloat = 0
+        if isNewPage {
+            print("isUp: \(isUp)")
+            if !isUp {
+                aa = self.contentOffset.y - (contentOffsetDict[currentIndex] ?? 0)
+                self.contentOffset.y = (contentOffsetDict[currentIndex] ?? 0)
+            }
+        }
+        
         contentView.frame = self.bounds
         contentView.bounds = CGRect(origin: self.contentOffset, size: contentView.bounds.size)
         let pagePinViewHeight: CGFloat = pagePinView?.frame.height ?? 0
@@ -152,19 +174,35 @@ open class EasyPagingView: UIScrollView {
                 frame.origin.x = 0
                 frame.size.width = self.contentView.bounds.width
                 subview.frame = frame
-                
-                
-                
                 if let pageView = pageDict[currentIndex]?.pageScrollView {
                     if self.contentOffset.y + pagePinViewHeight < yOffsetOfCurrentSubview {
-                        pageView.contentOffset.y = 0
-                        pageCurrentOffsetDict[currentIndex] = 0
+                        
+                        var pageOffsetY: CGFloat = 0
+                        
+                        if isNewPage {
+                            pageOffsetY = pageCurrentOffsetDict[currentIndex] ?? 0
+                            pageOffsetY += aa
+                            if pageOffsetY <= 0 {
+                                isNewPage = false
+                                pageOffsetY = 0
+                                aa = 0
+                            }
+                        }
+                        pageView.contentOffset.y = pageOffsetY
+                        pageCurrentOffsetDict[currentIndex] = pageOffsetY
                     } else {
+                        if isNewPage {
+                            isNewPage = false
+                            self.contentOffset.y += (pageCurrentOffsetDict[currentIndex] ?? 0)
+                            contentView.bounds.origin = self.contentOffset
+                        }
                         let pageOffsetY = self.contentOffset.y + pagePinViewHeight - yOffsetOfCurrentSubview
                         pageView.contentOffset.y = pageOffsetY
                         pageCurrentOffsetDict[currentIndex] = pageOffsetY
+                        print("pageOffsetY: \(pageOffsetY)")
                     }
                     contentOffsetDict[currentIndex] = self.contentOffset.y
+                    print("contentOffset: \(self.contentOffset.y)")
                     yOffsetOfCurrentSubview += pageView.contentSize.height
                 }
 
@@ -220,16 +258,25 @@ open class EasyPagingView: UIScrollView {
     
     // TODO: 切换 page 的 scrollView contentOffset.y
     func horizontalScrollDidEnd(at index: Int) {
-        currentIndex = index
+        
         let currentContentOffsetY = contentOffsetDict[index] ?? 0
         if self.contentOffset.y > self.pageCollectionViewOriginY {
+            // pinView 已经达到顶部，直接切换 contentOffsetY
             self.contentOffset.y = max(self.pageCollectionViewOriginY, currentContentOffsetY)
         } else {
 //            self.contentOffset.y = max(contentOffset.y, currentContentOffsetY)
             // 如果 currentContentOffsetY 不为 nil
             // 当向上滚动，整个 ScrollView 向上，直到 contentOffset.y 达到 pageCollectionViewOriginY
             // 当向下滚动，当前page向下，直到 page.contentOffset.y 到达 0.
+            // pinView 未滚动到顶部，需要情况切换 contentOffsetY，在 layoutSubviews() 内切换。
+            if currentIndex != index {
+                isNewPage = true
+                for i in 0..<dataSource!.numberOfLists(in: self) {
+                    contentOffsetDict[i] = self.contentOffset.y
+                }
+            }
         }
+        currentIndex = index
     }
     
     // MARK: - KVO
@@ -294,7 +341,6 @@ extension EasyPagingView: UICollectionViewDataSource, UICollectionViewDelegateFl
             cell.contentView.addSubview(pageView)
             page?.pageScrollView.frame = cell.contentView.bounds
         }
-        page?.pageScrollView.contentOffset.y = pageCurrentOffsetDict[indexPath.item] ?? 0
         return cell
     }
     
@@ -306,23 +352,28 @@ extension EasyPagingView: UICollectionViewDataSource, UICollectionViewDelegateFl
         
     }
     
-    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
-//        let index = Int(scrollView.contentOffset.x/scrollView.bounds.size.width)
-////        self.contentOffset.y = contentOffsetDict[index] ?? 0
-//        if index != currentIndex {
-//            currentIndex = index
-//        }
-    }
-    
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        guard scrollView !== self else { return }
         let index = Int(scrollView.contentOffset.x/scrollView.bounds.size.width)
         horizontalScrollDidEnd(at: index)
     }
     
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        guard scrollView !== self else { return }
         if !decelerate {
             let index = Int(scrollView.contentOffset.x/scrollView.bounds.size.width)
             horizontalScrollDidEnd(at: index)
+        }
+    }
+    
+    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if scrollView ===  self {
+            if scrollView.contentOffset.y > lastOffsetY {
+                isUp = true
+            } else {
+                isUp = false
+            }
+            lastOffsetY = scrollView.contentOffset.y
         }
     }
 }

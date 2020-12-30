@@ -29,7 +29,7 @@ class ViewController: UIViewController {
         view0 = UIScrollView(frame: CGRect(origin: .zero, size: CGSize(width: viewWidth, height: 400)))
         view0.contentSize = CGSize(width: viewWidth, height: viewHeight*1.2)
         view0.backgroundColor = .purple
-        containerView.contentView.addSubview(view0)
+        containerView.pageHeaderView = view0
         
         view1.frame = CGRect(origin: .zero, size: CGSize(width: viewWidth, height: 64))
         view1.backgroundColor = .blue
