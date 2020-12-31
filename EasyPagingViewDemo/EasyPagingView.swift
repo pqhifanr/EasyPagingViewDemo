@@ -10,8 +10,12 @@ import UIKit
 // 参考: https://oleb.net/blog/2014/05/scrollviews-inside-scrollviews/
 
 fileprivate let kContentSize = "contentSize"
+fileprivate let kContentOffset = "contentOffset"
 fileprivate let kFrame = "frame"
 fileprivate let kBounds = "bounds"
+// MARK: - KVO
+let PageCollectionViewKVOContext = UnsafeMutableRawPointer(bitPattern: 1)
+let ContentViewKVOContext = UnsafeMutableRawPointer(bitPattern: 2)
 
 public protocol EasyPagingViewPageViewDelegate: NSObjectProtocol {
     var pageView: UIView { get }
@@ -42,9 +46,12 @@ open class EasyPagingView: UIScrollView {
     var pageCurrentOffsetDict = [Int: CGFloat]()
     var contentOffsetDict = [Int: CGFloat]()
     var pageCollectionViewPinY: CGFloat = 0
+    
+    /// 当 pinView 未到达最高点时切换列表
     var switchToNewPageWhenPinViewNotInTop: Bool = false
+    var switchToNewPageWhenPinViewNotInTopContentOffset: CGFloat = 0
     var lastOffsetY: CGFloat = 0
-    var isScrollingUp: Bool = false
+    var isScrollingDown: Bool = false
 
     var currentIndex: Int = 0
     var subviewsInLayoutOrder = [UIView]()
@@ -70,6 +77,8 @@ open class EasyPagingView: UIScrollView {
     
     private func commonInitForEasyContainerScrollview() {
         
+        
+        
         contentView = EasyContainerScrollViewContentView()
         self.addSubview(contentView)
         
@@ -86,7 +95,7 @@ open class EasyPagingView: UIScrollView {
         pageCollectionView.showsHorizontalScrollIndicator = false
         pageCollectionView.contentInsetAdjustmentBehavior = .never
         
-        self.delegate = self
+        self.addObserver(self, forKeyPath: kContentOffset, options: .old, context: ContentViewKVOContext)
     }
     
     func reloadData() {
@@ -123,10 +132,10 @@ open class EasyPagingView: UIScrollView {
             if scrollView !== pageCollectionView {
                 scrollView.isScrollEnabled = false
             }
-            scrollView.addObserver(self, forKeyPath: kContentSize, options: .old, context: KVOContext)
+            scrollView.addObserver(self, forKeyPath: kContentSize, options: .old, context: PageCollectionViewKVOContext)
         } else {
-            subview.addObserver(self, forKeyPath: kFrame, options: .old, context: KVOContext)
-            subview.addObserver(self, forKeyPath: kBounds, options: .old, context: KVOContext)
+            subview.addObserver(self, forKeyPath: kFrame, options: .old, context: PageCollectionViewKVOContext)
+            subview.addObserver(self, forKeyPath: kBounds, options: .old, context: PageCollectionViewKVOContext)
         }
         
         self.setNeedsLayout()
@@ -136,10 +145,10 @@ open class EasyPagingView: UIScrollView {
     func willRemoveSubviewFromContainer(_ subview: UIView) {
         if let scrollView = subview as? UIScrollView{
             scrollView.isScrollEnabled = false
-            scrollView.removeObserver(self, forKeyPath: kContentSize, context: KVOContext)
+            scrollView.removeObserver(self, forKeyPath: kContentSize, context: PageCollectionViewKVOContext)
         } else {
-            subview.removeObserver(self, forKeyPath: kFrame, context: KVOContext)
-            subview.removeObserver(self, forKeyPath: kBounds, context: KVOContext)
+            subview.removeObserver(self, forKeyPath: kFrame, context: PageCollectionViewKVOContext)
+            subview.removeObserver(self, forKeyPath: kBounds, context: PageCollectionViewKVOContext)
         }
         
         subviewsInLayoutOrder.removeAll(where: { $0 === subview })
@@ -152,24 +161,29 @@ open class EasyPagingView: UIScrollView {
         var pageScrollViewOffsetY: CGFloat = 0
         var switchToNewPageAndScrollDownOffsetY: CGFloat = 0
         if switchToNewPageWhenPinViewNotInTop {
-            if !isScrollingUp {
+            if isScrollingDown {
                 // 向下滚动
-                switchToNewPageAndScrollDownOffsetY = self.contentOffset.y - (contentOffsetDict[currentIndex] ?? 0)
-                self.contentOffset.y = (contentOffsetDict[currentIndex] ?? 0)
+                switchToNewPageAndScrollDownOffsetY = self.contentOffset.y - switchToNewPageWhenPinViewNotInTopContentOffset
+                self.contentOffset.y = switchToNewPageWhenPinViewNotInTopContentOffset
             }
             
-            if contentOffset.y < self.pageCollectionViewPinY {
+            if !isPinViewScrollToTop {
                 pageScrollViewOffsetY = pageCurrentOffsetDict[currentIndex] ?? 0
                 pageScrollViewOffsetY += switchToNewPageAndScrollDownOffsetY
+                
+                let contentOffsetY = contentOffsetDict[currentIndex] ?? 0
+                contentOffsetDict[currentIndex] = contentOffsetY + switchToNewPageAndScrollDownOffsetY
                 if pageScrollViewOffsetY <= 0 {
                     switchToNewPageWhenPinViewNotInTop = false
                     pageScrollViewOffsetY = 0
-                    switchToNewPageAndScrollDownOffsetY = 0
                 }
             } else {
                 switchToNewPageWhenPinViewNotInTop = false
                 self.contentOffset.y += (pageCurrentOffsetDict[currentIndex] ?? 0)
             }
+            switchToNewPageWhenPinViewNotInTopContentOffset = self.contentOffset.y
+        } else {
+            contentOffsetDict[currentIndex] = self.contentOffset.y
         }
         
         contentView.frame = self.bounds
@@ -197,7 +211,6 @@ open class EasyPagingView: UIScrollView {
                         pageView.contentOffset.y = pageOffsetY
                         pageCurrentOffsetDict[currentIndex] = pageOffsetY
                     }
-                    contentOffsetDict[currentIndex] = self.contentOffset.y
                     yOffsetOfCurrentSubview += pageView.contentSize.height
                 }
 
@@ -266,20 +279,15 @@ open class EasyPagingView: UIScrollView {
             // pinView 未滚动到顶部，需要情况切换 contentOffsetY，在 layoutSubviews() 内切换。
             if currentIndex != index {
                 switchToNewPageWhenPinViewNotInTop = true
-                for i in 0..<dataSource!.numberOfLists(in: self) {
-                    contentOffsetDict[i] = self.contentOffset.y
-                }
+                switchToNewPageWhenPinViewNotInTopContentOffset = contentOffset.y
             }
         }
         currentIndex = index
     }
-    
-    // MARK: - KVO
-    let KVOContext = UnsafeMutableRawPointer(bitPattern: 1)
 
     open override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
         
-        if context == KVOContext {
+        if context == PageCollectionViewKVOContext {
             
             if keyPath == kContentSize {
                 if let scrollView = object as? UIScrollView {
@@ -298,6 +306,17 @@ open class EasyPagingView: UIScrollView {
                         self.setNeedsLayout()
                         self.layoutIfNeeded()
                     }
+                }
+            }
+        } else if context == ContentViewKVOContext {
+            if keyPath == kContentOffset {
+                if let scrollView = object as? UIScrollView {
+                    if scrollView.contentOffset.y < lastOffsetY {
+                        isScrollingDown = true
+                    } else {
+                        isScrollingDown = false
+                    }
+                    lastOffsetY = scrollView.contentOffset.y
                 }
             }
         } else {
@@ -326,7 +345,7 @@ extension EasyPagingView: UICollectionViewDataSource, UICollectionViewDelegateFl
             page?.pageView.setNeedsLayout()
             page?.pageView.layoutIfNeeded()
             
-            page?.pageScrollView.addObserver(self, forKeyPath: kContentSize, options: .old, context: KVOContext)
+            page?.pageScrollView.addObserver(self, forKeyPath: kContentSize, options: .old, context: PageCollectionViewKVOContext)
             
         }
         
@@ -361,14 +380,14 @@ extension EasyPagingView: UICollectionViewDataSource, UICollectionViewDelegateFl
         }
     }
     
-    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        if scrollView ===  self {
-            if scrollView.contentOffset.y > lastOffsetY {
-                isScrollingUp = true
-            } else {
-                isScrollingUp = false
-            }
-            lastOffsetY = scrollView.contentOffset.y
-        }
-    }
+//    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+//        if scrollView ===  self {
+//            if scrollView.contentOffset.y < lastOffsetY {
+//                isScrollingDown = true
+//            } else {
+//                isScrollingDown = false
+//            }
+//            lastOffsetY = scrollView.contentOffset.y
+//        }
+//    }
 }
