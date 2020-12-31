@@ -13,6 +13,8 @@ fileprivate let kContentSize = "contentSize"
 fileprivate let kContentOffset = "contentOffset"
 fileprivate let kFrame = "frame"
 fileprivate let kBounds = "bounds"
+fileprivate let cellIdentifier = "EasyPagingViewPageCell"
+
 // MARK: - KVO
 let PageCollectionViewKVOContext = UnsafeMutableRawPointer(bitPattern: 1)
 let ContentViewKVOContext = UnsafeMutableRawPointer(bitPattern: 2)
@@ -41,7 +43,6 @@ open class EasyPagingView: UIScrollView {
     public var pagePinView: UIView?
     public var pageCollectionView: UICollectionView!
     
-    let cellIdentifier = "EasyPagingViewPageCell"
     var pageDict = [Int : EasyPagingViewPageViewDelegate]()
     var pageCurrentOffsetDict = [Int: CGFloat]()
     var contentOffsetDict = [Int: CGFloat]()
@@ -52,7 +53,14 @@ open class EasyPagingView: UIScrollView {
     var switchToNewPageWhenPinViewNotInTopContentOffset: CGFloat = 0
     var lastOffsetY: CGFloat = 0
     var isScrollingDown: Bool = false
-
+    var pinViewOriginY: CGFloat = 0
+    
+    // 拖动
+    var pageCollectionViewOriginY: CGFloat = 0
+    var pinViewDragingBeginOriginY: CGFloat = 0
+    var isPinViewDraging: Bool = false
+    var panGesture: UIPanGestureRecognizer?
+    
     var currentIndex: Int = 0
     var subviewsInLayoutOrder = [UIView]()
     var currentPageScrollView: UIScrollView?
@@ -76,8 +84,6 @@ open class EasyPagingView: UIScrollView {
     }
     
     private func commonInitForEasyContainerScrollview() {
-        
-        
         
         contentView = EasyContainerScrollViewContentView()
         self.addSubview(contentView)
@@ -105,10 +111,13 @@ open class EasyPagingView: UIScrollView {
         }
         
         if let pinView = pagePinView {
+            panGesture = UIPanGestureRecognizer(target: self, action: #selector(pinViewPanGesture(_:)))
+            pinView.addGestureRecognizer(panGesture!)
             contentView.addSubview(pinView)
         }
         
         contentView.addSubview(pageCollectionView)
+        pageCollectionView.reloadData()
         if let pinView = pagePinView {
             contentView.bringSubviewToFront(pinView)
         }
@@ -157,6 +166,9 @@ open class EasyPagingView: UIScrollView {
     
     open override func layoutSubviews() {
         super.layoutSubviews()
+        guard !isPinViewDraging else { return }
+        
+        
         
         var pageScrollViewOffsetY: CGFloat = 0
         var switchToNewPageAndScrollDownOffsetY: CGFloat = 0
@@ -202,6 +214,7 @@ open class EasyPagingView: UIScrollView {
                 frame.origin.x = 0
                 frame.size.width = self.contentView.bounds.width
                 subview.frame = frame
+                pageCollectionViewOriginY = frame.origin.y
                 if let pageView = pageDict[currentIndex]?.pageScrollView {
                     if !isPinViewScrollToTop {
                         pageView.contentOffset.y = pageScrollViewOffsetY
@@ -237,11 +250,19 @@ open class EasyPagingView: UIScrollView {
                 yOffsetOfCurrentSubview += scrollView.contentSize.height + scrollView.contentInset.top + scrollView.contentInset.bottom
             }  else {
                 var frame = subview.frame
-                frame.origin.y = max(yOffsetOfCurrentSubview, self.contentOffset.y)
+                var originY: CGFloat = 0
+                if contentOffset.y < yOffsetOfCurrentSubview - (bounds.height - frame.height) {
+                    originY = contentOffset.y + bounds.height - frame.height
+                    panGesture?.isEnabled = true
+                } else {
+                    panGesture?.isEnabled = false
+                    originY = max(yOffsetOfCurrentSubview, self.contentOffset.y)
+                }
+                frame.origin.y = max(originY, self.contentOffset.y)
                 frame.origin.x = 0
                 frame.size.width = self.contentView.bounds.width
                 subview.frame = frame
-                
+                self.pinViewOriginY = originY
                 yOffsetOfCurrentSubview += frame.size.height
             }
             
@@ -317,6 +338,11 @@ open class EasyPagingView: UIScrollView {
                         isScrollingDown = false
                     }
                     lastOffsetY = scrollView.contentOffset.y
+                    
+                    let didEndScroll = scrollView.isTracking && !scrollView.isDragging && !scrollView.isDecelerating
+                    if !didEndScroll {
+                        panGesture?.isEnabled = false
+                    }
                 }
             }
         } else {
@@ -367,27 +393,68 @@ extension EasyPagingView: UICollectionViewDataSource, UICollectionViewDelegateFl
     }
     
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        guard scrollView !== self else { return }
         let index = Int(scrollView.contentOffset.x/scrollView.bounds.size.width)
         horizontalScrollDidEnd(at: index)
     }
     
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        guard scrollView !== self else { return }
         if !decelerate {
             let index = Int(scrollView.contentOffset.x/scrollView.bounds.size.width)
             horizontalScrollDidEnd(at: index)
         }
     }
-    
-//    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
-//        if scrollView ===  self {
-//            if scrollView.contentOffset.y < lastOffsetY {
-//                isScrollingDown = true
-//            } else {
-//                isScrollingDown = false
-//            }
-//            lastOffsetY = scrollView.contentOffset.y
-//        }
-//    }
+}
+
+extension EasyPagingView {
+    @objc func pinViewPanGesture(_ gesture: UIPanGestureRecognizer) {
+        
+        if gesture.state == .began {
+            if !isPinViewDraging {
+                self.isScrollEnabled = false
+                isPinViewDraging = true
+                pageDict[currentIndex]?.pageScrollView.isScrollEnabled = true
+            }
+            pinViewDragingBeginOriginY = pagePinView!.frame.origin.y
+            
+        } else if gesture.state == .changed {
+            let gestureOffsetY = gesture.translation(in: contentView).y
+            pagePinView?.frame.origin.y = (pinViewDragingBeginOriginY + gestureOffsetY)
+            pageCollectionView.frame.origin.y = (pagePinView!.frame.origin.y + pagePinView!.frame.height)
+        } else if gesture.state == .ended {
+            let velocityY = gesture.velocity(in: contentView).y
+            let gestureOffsetY = gesture.translation(in: contentView).y
+            let panHeight = (bounds.height - pagePinView!.frame.height) / 2
+            let pinViewShouldScrollToBottom: Bool
+            if gestureOffsetY < 0 {
+                // 向上滚动
+                if -gestureOffsetY > panHeight || velocityY < -300 {
+                    pinViewShouldScrollToBottom = false
+                } else {
+                    pinViewShouldScrollToBottom = true
+                }
+            } else {
+                // 向下滚动
+                if gestureOffsetY > panHeight || velocityY > 300 {
+                    pinViewShouldScrollToBottom = true
+                } else {
+                    pinViewShouldScrollToBottom = false
+                }
+            }
+            
+            let pinViewDragingEndOriginY = !pinViewShouldScrollToBottom ? pinViewOriginY - bounds.height + pagePinView!.frame.height : pinViewOriginY
+            UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseInOut) {
+                self.pagePinView?.frame.origin.y = pinViewDragingEndOriginY
+                self.pageCollectionView.frame.origin.y = (self.pagePinView!.frame.origin.y + self.pagePinView!.frame.height)
+            } completion: { (success) in
+                if success {
+                    if pinViewDragingEndOriginY == self.pinViewOriginY {
+                        self.isPinViewDraging = false
+                        self.pageCollectionView.frame.origin.y = self.pageCollectionViewOriginY
+                        self.pageDict[self.currentIndex]?.pageScrollView.isScrollEnabled = false
+                        self.isScrollEnabled = true
+                    }
+                }
+            }
+        }
+    }
 }
